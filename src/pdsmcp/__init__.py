@@ -4,7 +4,7 @@ Install as: pip install xhelio-pds
 For MCP server: pip install xhelio-pds[mcp]
 """
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 from pdsmcp.config import configure  # noqa: F401
 
