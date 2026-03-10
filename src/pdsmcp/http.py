@@ -7,8 +7,8 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT = 10  # seconds
-DEFAULT_RETRIES = 3
+DEFAULT_TIMEOUT = 5  # seconds
+DEFAULT_RETRIES = 2
 DEFAULT_BACKOFF = 1  # seconds (doubles each retry)
 
 

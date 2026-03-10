@@ -531,3 +531,99 @@ def rebuild_catalog(mission: str | None = None) -> dict:
         "missions_rebuilt": len(rebuilt),
         "missions": rebuilt,
     }
+
+
+def build_metadata(
+    mission: str | None = None,
+    force: bool = False,
+    workers: int = 10,
+) -> dict:
+    """Build bundled parameter metadata for all datasets from PDS labels.
+
+    Downloads one label per dataset (in parallel), parses it, and writes
+    the metadata to the bundled ``data/metadata/`` directory that ships
+    with the package.
+
+    Args:
+        mission: Only build this mission stem. If None, build all.
+        force: If True, rebuild even if metadata already exists.
+        workers: Number of parallel download threads (default: 10).
+
+    Returns:
+        Dict with built, failed, skipped counts.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from pdsmcp.metadata import (
+        _dataset_id_to_cache_filename,
+        _fetch_metadata_from_label,
+    )
+
+    bundled_dir = Path(__file__).resolve().parent / "data" / "metadata"
+    bundled_dir.mkdir(parents=True, exist_ok=True)
+
+    missions_dir = _get_missions_dir()
+    datasets: list[str] = []
+    for filepath in sorted(missions_dir.glob("*.json")):
+        stem = filepath.stem
+        if mission and stem != mission:
+            continue
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                mission_data = json.load(f)
+            for inst in mission_data.get("instruments", {}).values():
+                for ds_id in inst.get("datasets", {}):
+                    datasets.append(ds_id)
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    # Filter out already-built (unless force)
+    to_build: list[str] = []
+    skipped = 0
+    for ds_id in datasets:
+        filename = _dataset_id_to_cache_filename(ds_id)
+        out_path = bundled_dir / filename
+        if out_path.exists() and not force:
+            skipped += 1
+        else:
+            to_build.append(ds_id)
+
+    built = 0
+    failed = 0
+    details: dict[str, str] = {}
+
+    def _build_one(ds_id: str) -> tuple[str, str, dict | None]:
+        try:
+            info = _fetch_metadata_from_label(ds_id)
+        except Exception as e:
+            return ds_id, f"error: {e}", None
+        if info is None:
+            return ds_id, "no_label", None
+        params = [p for p in info.get("parameters", []) if p.get("name") != "Time"]
+        if not params:
+            return ds_id, "no_params", None
+        return ds_id, f"ok ({len(params)} params)", info
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_build_one, ds_id): ds_id for ds_id in to_build}
+        for future in as_completed(futures):
+            ds_id, status, info = future.result()
+            details[ds_id] = status
+            if info is not None:
+                filename = _dataset_id_to_cache_filename(ds_id)
+                out_path = bundled_dir / filename
+                with open(out_path, "w", encoding="utf-8") as f:
+                    json.dump(info, f, indent=2, ensure_ascii=False)
+                    f.write("\n")
+                built += 1
+            else:
+                failed += 1
+
+    return {
+        "status": "success",
+        "built": built,
+        "skipped": skipped,
+        "failed": failed,
+        "total": len(datasets),
+        "details": details,
+    }

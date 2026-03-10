@@ -117,6 +117,11 @@ def browse_parameters(
     return {"status": "success", "datasets": results}
 
 
+def _get_bundled_metadata_dir() -> Path:
+    """Return the bundled metadata directory shipped with the package."""
+    return Path(__file__).resolve().parent / "data" / "metadata"
+
+
 # ---------------------------------------------------------------------------
 # Resolution chain
 # ---------------------------------------------------------------------------
@@ -144,6 +149,15 @@ def _resolve_metadata(dataset_id: str) -> dict:
     if cache_file.exists():
         try:
             with open(cache_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Try bundled metadata (shipped with the package)
+    bundled_file = _get_bundled_metadata_dir() / cache_filename
+    if bundled_file.exists():
+        try:
+            with open(bundled_file, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
             pass
@@ -322,7 +336,7 @@ def _find_one_label(
             if label_ext in exts:
                 label_url = f"{collection_url}{exts[label_ext]}"
                 try:
-                    resp = request_with_retry(label_url, timeout=30)
+                    resp = request_with_retry(label_url, retries=1)
                     return (resp.text, label_ext)
                 except Exception:
                     continue
@@ -349,7 +363,7 @@ def _fetch_directory_listing(url: str) -> str:
     Returns:
         Raw HTML text of the listing page.
     """
-    resp = request_with_retry(url, timeout=30)
+    resp = request_with_retry(url, retries=1)
     return resp.text
 
 

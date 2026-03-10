@@ -186,6 +186,7 @@ def create_server() -> FastMCP:
         older_than_days: int | None = None,
         dry_run: bool = True,
         detail: bool = False,
+        force: bool = False,
     ) -> str:
         """Manage the local PDS cache — view status, clean files, refresh metadata, or rebuild catalogs.
 
@@ -193,19 +194,22 @@ def create_server() -> FastMCP:
         - "status": Show disk usage for metadata and data caches. Set detail=True for per-subdirectory breakdown.
         - "clean": Delete cached files. Defaults to dry_run=True (preview only). Filter by category, mission, or age.
         - "refresh_metadata": Re-download PDS label metadata. Specify dataset_ids or mission to scope.
+        - "build_metadata": Build bundled parameter metadata for all datasets from PDS labels. Set force=True to rebuild existing.
         - "refresh_time_ranges": Update start/stop dates in mission catalog JSONs from Metadex API. Optionally filter by mission.
         - "rebuild_catalog": Regenerate mission catalog JSONs from Metadex API. Optionally filter by mission.
 
         Args:
-            action: One of "status", "clean", "refresh_metadata", "refresh_time_ranges", "rebuild_catalog".
+            action: One of "status", "clean", "refresh_metadata", "build_metadata", "refresh_time_ranges", "rebuild_catalog".
             category: For "clean" — "metadata", "data_cache", or "all" (default).
             mission: Filter to a single mission stem (e.g., "juno", "cassini").
             dataset_ids: For "refresh_metadata" — specific dataset IDs to refresh.
             older_than_days: For "clean" — only delete files older than N days.
             dry_run: For "clean" — if True (default), preview without deleting.
             detail: For "status" — if True, include per-subdirectory breakdown.
+            force: For "build_metadata" — if True, rebuild even if metadata already exists.
         """
         from pdsmcp.cache import (
+            build_metadata,
             cache_status,
             cache_clean,
             refresh_metadata,
@@ -236,6 +240,11 @@ def create_server() -> FastMCP:
                 refresh_time_ranges(mission=mission),
                 indent=2,
             )
+        elif action == "build_metadata":
+            return json.dumps(
+                build_metadata(mission=mission, force=force),
+                indent=2,
+            )
         elif action == "rebuild_catalog":
             return json.dumps(
                 rebuild_catalog(mission=mission),
@@ -245,7 +254,7 @@ def create_server() -> FastMCP:
             return json.dumps({
                 "status": "error",
                 "message": f"Unknown action: {action}. "
-                           "Valid: status, clean, refresh_metadata, refresh_time_ranges, rebuild_catalog",
+                           "Valid: status, clean, refresh_metadata, build_metadata, refresh_time_ranges, rebuild_catalog",
             })
 
     return mcp
