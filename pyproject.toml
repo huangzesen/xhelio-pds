@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xhelio-pds"
-version = "0.2.0"
+version = "0.2.1"
 description = "NASA PDS Planetary Plasma Interactions data access — browse missions, inspect parameters, fetch PDS data"
 readme = "README.md"
 license = "MIT"
