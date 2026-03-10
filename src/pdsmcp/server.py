@@ -36,16 +36,12 @@ def create_server() -> FastMCP:
     )
 
     @mcp.tool()
-    def browse_missions(query: str | None = None) -> str:
+    def browse_missions() -> str:
         """List all available PDS PPI missions with descriptions, dataset counts, and instrument names.
 
-        Call this first to discover what missions are available. Returns a JSON array
-        of mission summaries. Optionally filter by keyword.
-
-        Args:
-            query: Optional keyword to filter missions (e.g., 'jupiter', 'magnetic').
+        Call this first to discover what missions are available. Returns a JSON array of mission summaries.
         """
-        missions = _browse_missions(query=query)
+        missions = _browse_missions()
         return json.dumps(missions, indent=2)
 
     @mcp.tool()
@@ -87,7 +83,7 @@ def create_server() -> FastMCP:
     @mcp.tool()
     def fetch_data(
         dataset_id: str,
-        parameter_id: str,
+        parameters: list[str],
         start: str,
         stop: str,
         format: str = "csv",
@@ -96,16 +92,17 @@ def create_server() -> FastMCP:
         """Fetch timeseries data from NASA PDS PPI archive, write to a file, return metadata + stats.
 
         Downloads PDS data files (fixed-width ASCII tables), extracts the requested
-        parameter, writes the data to a file on disk, and returns rich metadata
+        parameters, writes the data to a file on disk, and returns rich metadata
         including per-column statistics (min, max, mean, std, nan_ratio).
 
         The data is NOT returned inline — read the file at the returned path.
+        The caller is responsible for cleaning up the file when done.
 
         Args:
             dataset_id: PDS dataset ID — PDS4 URN (e.g., 'urn:nasa:pds:cassini-mag-cal:data-1sec-krtp')
                         or PDS3 (e.g., 'pds3:JNO-J-3-FGM-CAL-V1.0:DATA').
-            parameter_id: Parameter name to fetch (e.g., 'BR', 'BX PLANETOCENTRIC').
-                          Use browse_parameters to discover available parameters.
+            parameters: List of parameter names to fetch (e.g., ['BR', 'BTHETA']).
+                        Use browse_parameters to discover available parameters.
             start: Start time in ISO 8601 format (e.g., '2024-01-01').
             stop: End time in ISO 8601 format (e.g., '2024-01-07').
             format: Output file format — 'csv' (default) or 'json'.
@@ -114,51 +111,136 @@ def create_server() -> FastMCP:
         import tempfile
         from datetime import datetime
 
-        # Call the library function — returns dict with DataFrame
+        # Call the library function — returns dict keyed by parameter
         lib_result = _fetch_data(
             dataset_id=dataset_id,
-            parameter_id=parameter_id,
+            parameters=parameters,
             start=start,
             stop=stop,
         )
-
-        df = lib_result["data"]
-        stats = lib_result.get("stats") or compute_stats(df)
 
         out_dir = Path(output_dir) if output_dir else Path(tempfile.gettempdir())
         out_dir.mkdir(parents=True, exist_ok=True)
         suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        # Write to file
-        safe_ds = dataset_id.replace(":", "_").replace("/", "_")
-        safe_param = parameter_id.replace(" ", "_")
-        file_path = out_dir / f"{safe_ds}_{safe_param}_{suffix}.{format}"
-
-        if format == "json":
-            data = {
-                "time": df.index.strftime("%Y-%m-%dT%H:%M:%S.%f").tolist(),
+        # Merge all parameter DataFrames and write to file
+        frames = []
+        param_meta = {}
+        for param_id, entry in lib_result.items():
+            if "error" in entry:
+                param_meta[param_id] = {"status": "error", "message": entry["error"]}
+                continue
+            df = entry["data"]
+            df.columns = [f"{param_id}.{c}" for c in df.columns]
+            frames.append(df)
+            param_meta[param_id] = {
+                "status": "success",
+                "units": entry["units"],
+                "description": entry["description"],
+                "rows": len(df),
+                "columns": list(df.columns),
+                "stats": entry["stats"],
             }
-            for col in df.columns:
-                data[str(col)] = [
-                    None if pd.isna(v) else v for v in df[col].tolist()
-                ]
+
+        if not frames:
+            return json.dumps({"status": "error", "message": "No data fetched",
+                               "parameters": param_meta}, indent=2)
+
+        merged = frames[0]
+        for f in frames[1:]:
+            merged = merged.join(f, how="outer")
+
+        # Write to file
+        file_path = out_dir / f"{dataset_id}_{suffix}.{format}"
+        if format == "json":
+            data = {"time": merged.index.strftime("%Y-%m-%dT%H:%M:%S.%f").tolist()}
+            for col in merged.columns:
+                data[col] = [None if pd.isna(v) else v for v in merged[col].tolist()]
             with open(file_path, "w") as f:
                 json.dump(data, f)
         else:
-            df.to_csv(file_path)
+            merged.to_csv(file_path)
 
         return json.dumps({
             "status": "success",
             "file_path": str(file_path),
             "format": format,
             "dataset_id": dataset_id,
-            "parameter_id": parameter_id,
             "time_range": {"start": start, "stop": stop},
-            "total_rows": len(df),
-            "units": lib_result.get("units", ""),
-            "description": lib_result.get("description", ""),
-            "stats": stats,
+            "total_rows": len(merged),
+            "parameters": param_meta,
         }, indent=2, default=str)
+
+    @mcp.tool()
+    def manage_cache(
+        action: str,
+        category: str = "all",
+        mission: str | None = None,
+        dataset_ids: list[str] | None = None,
+        older_than_days: int | None = None,
+        dry_run: bool = True,
+        detail: bool = False,
+    ) -> str:
+        """Manage the local PDS cache — view status, clean files, refresh metadata, or rebuild catalogs.
+
+        Actions:
+        - "status": Show disk usage for metadata and data caches. Set detail=True for per-subdirectory breakdown.
+        - "clean": Delete cached files. Defaults to dry_run=True (preview only). Filter by category, mission, or age.
+        - "refresh_metadata": Re-download PDS label metadata. Specify dataset_ids or mission to scope.
+        - "refresh_time_ranges": Update start/stop dates in mission catalog JSONs from Metadex API. Optionally filter by mission.
+        - "rebuild_catalog": Regenerate mission catalog JSONs from Metadex API. Optionally filter by mission.
+
+        Args:
+            action: One of "status", "clean", "refresh_metadata", "refresh_time_ranges", "rebuild_catalog".
+            category: For "clean" — "metadata", "data_cache", or "all" (default).
+            mission: Filter to a single mission stem (e.g., "juno", "cassini").
+            dataset_ids: For "refresh_metadata" — specific dataset IDs to refresh.
+            older_than_days: For "clean" — only delete files older than N days.
+            dry_run: For "clean" — if True (default), preview without deleting.
+            detail: For "status" — if True, include per-subdirectory breakdown.
+        """
+        from pdsmcp.cache import (
+            cache_status,
+            cache_clean,
+            refresh_metadata,
+            refresh_time_ranges,
+            rebuild_catalog,
+        )
+
+        if action == "status":
+            return json.dumps(cache_status(detail=detail), indent=2)
+        elif action == "clean":
+            missions_list = [mission] if mission else None
+            return json.dumps(
+                cache_clean(
+                    category=category,
+                    missions=missions_list,
+                    older_than_days=older_than_days,
+                    dry_run=dry_run,
+                ),
+                indent=2,
+            )
+        elif action == "refresh_metadata":
+            return json.dumps(
+                refresh_metadata(dataset_ids=dataset_ids, mission=mission),
+                indent=2,
+            )
+        elif action == "refresh_time_ranges":
+            return json.dumps(
+                refresh_time_ranges(mission=mission),
+                indent=2,
+            )
+        elif action == "rebuild_catalog":
+            return json.dumps(
+                rebuild_catalog(mission=mission),
+                indent=2,
+            )
+        else:
+            return json.dumps({
+                "status": "error",
+                "message": f"Unknown action: {action}. "
+                           "Valid: status, clean, refresh_metadata, refresh_time_ranges, rebuild_catalog",
+            })
 
     return mcp
 

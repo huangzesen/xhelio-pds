@@ -92,38 +92,66 @@ def _get_cache_dir() -> Path:
 
 def fetch_data(
     dataset_id: str,
-    parameter_id: str,
+    parameters: list[str],
     start: str,
     stop: str,
 ) -> dict:
-    """Fetch PDS PPI data.
+    """Fetch PDS PPI data for one or more parameters.
 
-    Downloads data files from the PDS PPI archive, parses them using
-    companion label files, and returns a DataFrame with the requested
-    parameter.
+    This is the library API — returns DataFrames directly. The MCP server
+    wrapper in server.py handles file-writing and metadata-only responses.
 
     Args:
         dataset_id: PDS dataset ID --- either a PDS4 URN
             (e.g., ``urn:nasa:pds:cassini-mag-cal:data-1sec-krtp``) or
             a PDS3 ID with ``pds3:`` prefix
             (e.g., ``pds3:JNO-J-3-FGM-CAL-V1.0:DATA``).
-        parameter_id: Parameter name (e.g., ``"BR"``,
-            ``"BX PLANETOCENTRIC"``).
+        parameters: List of parameter names to fetch (e.g.,
+            ``["BR", "BTHETA"]``).
         start: ISO start time (e.g., ``"2005-01-01T00:00:00Z"``).
         stop: ISO end time (e.g., ``"2005-01-02T00:00:00Z"``).
 
     Returns:
-        Dict with keys:
+        Dict keyed by parameter name. Each value has:
 
         - ``data``: :class:`pandas.DataFrame` with DatetimeIndex
         - ``units``: unit string from metadata
         - ``description``: parameter description
-        - ``fill_value``: numeric fill value (or ``None``)
         - ``stats``: per-column statistics dict
+
+        On error, the value has just ``{"error": str}``.
+    """
+    results = {}
+    for param_id in parameters:
+        try:
+            result = _fetch_single_parameter(
+                dataset_id, param_id, start, stop,
+            )
+            results[param_id] = result
+        except Exception as e:
+            results[param_id] = {"error": str(e)}
+    return results
+
+
+def _fetch_single_parameter(
+    dataset_id: str,
+    parameter_id: str,
+    start: str,
+    stop: str,
+) -> dict:
+    """Fetch a single parameter from the PDS PPI archive.
+
+    Args:
+        dataset_id: PDS dataset ID (URN or pds3: prefixed).
+        parameter_id: Parameter name.
+        start: ISO start time.
+        stop: ISO end time.
+
+    Returns:
+        Dict with: data (DataFrame), units, description, fill_value, stats.
 
     Raises:
         ValueError: If no data is available or parameter not found.
-        requests.HTTPError: If a download fails.
     """
     # 1. Try to load parameter metadata from local cache
     units = ""
