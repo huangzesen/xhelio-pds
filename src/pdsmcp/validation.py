@@ -27,12 +27,10 @@ _DRIFT_ATTRS = ("units", "type", "size")
 def get_validation_dir() -> Path:
     """Return the validation records directory.
 
-    Respects ``PDSMCP_CACHE_DIR`` env var. Defaults to ``~/.pdsmcp/validation/``.
+    Delegates to ``config.get_cache_root()`` for the base path.
     """
-    custom = os.environ.get("PDSMCP_CACHE_DIR")
-    if custom:
-        return Path(custom) / "validation"
-    return Path.home() / ".pdsmcp" / "validation"
+    from pdsmcp.config import get_cache_root
+    return get_cache_root() / "validation"
 
 
 def _validation_filename(dataset_id: str) -> str:

@@ -77,13 +77,10 @@ _TIME_PATTERNS = [
 def _get_cache_dir() -> Path:
     """Return the local file cache directory.
 
-    Uses ``PDSMCP_CACHE_DIR`` environment variable if set, otherwise
-    defaults to ``~/.pdsmcp/data_cache/``.
+    Delegates to ``config.get_cache_root()`` for the base path.
     """
-    custom = os.environ.get("PDSMCP_CACHE_DIR")
-    if custom:
-        return Path(custom) / "data_cache"
-    return Path.home() / ".pdsmcp" / "data_cache"
+    from pdsmcp.config import get_cache_root
+    return get_cache_root() / "data_cache"
 
 
 # ---------------------------------------------------------------------------

@@ -47,14 +47,13 @@ _LABEL_EXTS = (".xml", ".lblx", ".lbl")
 def get_cache_dir() -> Path:
     """Return the metadata cache directory.
 
-    Configurable via the ``PDSMCP_CACHE_DIR`` environment variable.  When set,
-    the metadata cache lives at ``$PDSMCP_CACHE_DIR/metadata/``.  Otherwise
-    defaults to ``~/.pdsmcp/metadata/``.
+    Delegates to ``config.get_cache_root()`` which checks (in order):
+    1. ``configure(cache_dir=...)`` value
+    2. ``PDSMCP_CACHE_DIR`` environment variable
+    3. Default ``~/.pdsmcp/``
     """
-    custom = os.environ.get("PDSMCP_CACHE_DIR")
-    if custom:
-        return Path(custom) / "metadata"
-    return _DEFAULT_CACHE_DIR
+    from pdsmcp.config import get_cache_root
+    return get_cache_root() / "metadata"
 
 
 def browse_parameters(

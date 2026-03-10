@@ -86,8 +86,8 @@ def create_server() -> FastMCP:
         parameters: list[str],
         start: str,
         stop: str,
+        output_dir: str,
         format: str = "csv",
-        output_dir: str | None = None,
     ) -> str:
         """Fetch timeseries data from NASA PDS PPI archive, write to a file, return metadata + stats.
 
@@ -105,12 +105,9 @@ def create_server() -> FastMCP:
                         Use browse_parameters to discover available parameters.
             start: Start time in ISO 8601 format (e.g., '2024-01-01').
             stop: End time in ISO 8601 format (e.g., '2024-01-07').
+            output_dir: Directory for the output file. Must be provided.
             format: Output file format — 'csv' (default) or 'json'.
-            output_dir: Directory for output file. Defaults to system temp dir.
         """
-        import tempfile
-        from datetime import datetime
-
         # Call the library function — returns dict keyed by parameter
         lib_result = _fetch_data(
             dataset_id=dataset_id,
@@ -119,9 +116,12 @@ def create_server() -> FastMCP:
             stop=stop,
         )
 
-        out_dir = Path(output_dir) if output_dir else Path(tempfile.gettempdir())
+        out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Descriptive filename: dataset_YYYYMMDD_YYYYMMDD.format
+        start_short = start[:10].replace("-", "")
+        stop_short = stop[:10].replace("-", "")
 
         # Merge all parameter DataFrames and write to file
         frames = []
@@ -150,8 +150,14 @@ def create_server() -> FastMCP:
         for f in frames[1:]:
             merged = merged.join(f, how="outer")
 
-        # Write to file
-        file_path = out_dir / f"{dataset_id}_{suffix}.{format}"
+        # Write to file — increment suffix if name already exists
+        base_name = f"{dataset_id}_{start_short}_{stop_short}"
+        file_path = out_dir / f"{base_name}.{format}"
+        counter = 1
+        while file_path.exists():
+            file_path = out_dir / f"{base_name}_{counter}.{format}"
+            counter += 1
+
         if format == "json":
             data = {"time": merged.index.strftime("%Y-%m-%dT%H:%M:%S.%f").tolist()}
             for col in merged.columns:
@@ -247,6 +253,19 @@ def create_server() -> FastMCP:
 
 def serve():
     """Run the MCP server (stdio transport)."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="PDS PPI MCP server")
+    parser.add_argument(
+        "--cache-dir", type=str, default=None,
+        help="Root directory for all caches (default: ~/.pdsmcp/)",
+    )
+    args = parser.parse_args()
+
+    if args.cache_dir:
+        from pdsmcp.config import configure
+        configure(cache_dir=args.cache_dir)
+
     logging.basicConfig(level=logging.INFO)
     server = create_server()
     server.run()

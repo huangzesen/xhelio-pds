@@ -16,10 +16,8 @@ _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 def _get_cache_root() -> Path:
     """Return the cache root directory."""
-    custom = os.environ.get("PDSMCP_CACHE_DIR")
-    if custom:
-        return Path(custom)
-    return Path.home() / ".pdsmcp"
+    from pdsmcp.config import get_cache_root
+    return get_cache_root()
 
 
 def _get_missions_dir():

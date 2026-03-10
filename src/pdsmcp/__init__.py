@@ -6,6 +6,8 @@ For MCP server: pip install xhelio-pds[mcp]
 
 __version__ = "0.1.0"
 
+from pdsmcp.config import configure  # noqa: F401
+
 
 def main():
     """Entry point for the MCP server (xhelio-pds-mcp command).
