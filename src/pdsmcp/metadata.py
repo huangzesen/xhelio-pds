@@ -102,6 +102,9 @@ def browse_parameters(
             stop = info.get("stopDate", "")
             if start or stop:
                 entry["time_range"] = {"start": start, "stop": stop}
+            # Include schema validation summary if available
+            from pdsmcp.validation import get_validation_summary
+            entry["validation"] = get_validation_summary(ds_id)
         except Exception as e:
             logger.warning("Could not load parameters for %s: %s", ds_id, e)
             entry = {"parameters": [], "error": str(e)}

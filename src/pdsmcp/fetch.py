@@ -193,12 +193,16 @@ def _fetch_single_parameter(
     frames = []
     first_label = None
     skipped = []
+    pending_validations = []
     for data_url, label_url in file_pairs:
         try:
             local_data = _download_file(data_url)
             local_label = _download_file(label_url)
 
             label = _parse_label(local_label)
+            pending_validations.append(
+                (label, label_url.rsplit("/", 1)[-1], label_url)
+            )
             if first_label is None:
                 first_label = label
 
@@ -228,6 +232,13 @@ def _fetch_single_parameter(
             logger.warning("Skipping %s: %s", fname, e)
             skipped.append(fname)
             continue
+
+    # Flush schema validation records
+    try:
+        from pdsmcp.validation import flush_validations
+        flush_validations(dataset_id, pending_validations)
+    except Exception as e:
+        logger.warning("Schema validation failed for %s: %s", dataset_id, e)
 
     if not frames:
         msg = (

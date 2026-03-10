@@ -207,7 +207,7 @@ def cache_status(detail: bool = False) -> dict:
     root = _get_cache_root()
 
     categories = {}
-    for name in ("metadata", "data_cache"):
+    for name in ("metadata", "data_cache", "validation"):
         cat_path = root / name
         stats = _scan_directory(cat_path)
         entry = {
@@ -248,7 +248,7 @@ def cache_clean(
     """
     root = _get_cache_root()
     if category == "all":
-        targets = ["metadata", "data_cache"]
+        targets = ["metadata", "data_cache", "validation"]
     else:
         targets = [category]
 
