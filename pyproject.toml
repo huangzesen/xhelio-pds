@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xhelio-pds"
+version = "0.1.0"
+description = "NASA PDS Planetary Plasma Interactions data access — browse missions, inspect parameters, fetch PDS data"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Zesen Huang" },
+]
+keywords = ["pds", "nasa", "heliophysics", "space-weather", "mcp", "planetary"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "requests>=2.28",
+]
+
+[project.urls]
+Homepage = "https://github.com/huangzesen/pdsmcp"
+Repository = "https://github.com/huangzesen/pdsmcp"
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.26.0"]
+dev = [
+    "pytest>=7.0",
+    "mcp>=1.26.0",
+]
+
+[project.scripts]
+xhelio-pds-mcp = "pdsmcp:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pdsmcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
