@@ -594,9 +594,14 @@ def _resolve_collection_url(dataset_id: str) -> str:
 def _resolve_pds4_collection_url(dataset_id: str) -> str:
     """Resolve a PDS4 URN to an archive collection URL.
 
-    Splits the URN into bundle and collection parts, lists the bundle
-    directory on the PDS archive, and matches the collection name
-    (handling hyphen/underscore variations).
+    First checks the mission JSON for a ``slot`` field (direct path
+    mapping), which handles URN-to-directory name mismatches (e.g.,
+    ``vg1-mag-jup/data-hg-1.92s`` →
+    ``/data/vg1-mag-jupiter/data-hgcoords-1_92sec``).
+
+    Falls back to listing the bundle directory and matching the
+    collection name (handling hyphen/underscore variations and planet
+    abbreviation expansion).
 
     Args:
         dataset_id: PDS4 URN (e.g.,
@@ -609,6 +614,12 @@ def _resolve_pds4_collection_url(dataset_id: str) -> str:
         ValueError: If the URN format is invalid or the collection is
             not found.
     """
+    # 1. Try slot from mission JSON (fastest, handles all name mismatches)
+    slot = _get_pds3_slot(dataset_id)
+    if slot:
+        return f"https://pds-ppi.igpp.ucla.edu{slot}/"
+
+    # 2. Fall back to directory-based resolution
     parts = dataset_id.split(":")
     if len(parts) < 5:
         raise ValueError(f"Invalid PDS URN format: {dataset_id}")
@@ -616,12 +627,18 @@ def _resolve_pds4_collection_url(dataset_id: str) -> str:
     bundle_urn = parts[3]      # e.g., "cassini-mag-cal"
     collection_urn = parts[4]  # e.g., "data-1sec-krtp"
 
-    # Bundle: underscores -> hyphens
+    # Bundle: underscores -> hyphens, with planet abbreviation expansion
     bundle_path = bundle_urn.replace("_", "-")
     bundle_url = f"{PPI_ARCHIVE_BASE}/{bundle_path}/"
 
-    # List bundle directory to find the actual collection name
-    entries = _list_directory(bundle_url)
+    # Try listing bundle dir; on failure, expand planet abbreviations
+    # (e.g., vg1-mag-jup -> vg1-mag-jupiter)
+    try:
+        entries = _list_directory(bundle_url)
+    except Exception:
+        bundle_path = _expand_planet_abbreviation(bundle_path)
+        bundle_url = f"{PPI_ARCHIVE_BASE}/{bundle_path}/"
+        entries = _list_directory(bundle_url)
     dir_names = [e["name"].rstrip("/") for e in entries if e["is_dir"]]
 
     collection_dir = _match_collection(collection_urn, dir_names)
@@ -697,11 +714,42 @@ def _get_pds3_slot(dataset_id: str) -> str | None:
     return None
 
 
+def _expand_planet_abbreviation(name: str) -> str:
+    """Expand common planet abbreviations in a PDS path component.
+
+    PDS URNs abbreviate planet names (``jup``, ``sat``, etc.) while
+    archive directories use full names (``jupiter``, ``saturn``, etc.).
+
+    Args:
+        name: Path component (e.g., ``vg1-mag-jup``).
+
+    Returns:
+        Expanded name (e.g., ``vg1-mag-jupiter``).  If no abbreviation
+        is found, the original name is returned unchanged.
+    """
+    _PLANET_EXPANSIONS = {
+        "jup": "jupiter",
+        "sat": "saturn",
+        "ura": "uranus",
+        "nep": "neptune",
+        "mer": "mercury",
+        "ven": "venus",
+    }
+    parts = name.split("-")
+    for i, part in enumerate(parts):
+        lower = part.lower()
+        if lower in _PLANET_EXPANSIONS:
+            parts[i] = _PLANET_EXPANSIONS[lower]
+            return "-".join(parts)
+    return name
+
+
 def _match_collection(urn_name: str, dir_names: list[str]) -> str | None:
     """Match a URN collection name to an actual directory name.
 
-    Tries: exact match, then hyphen/underscore swap, then fully
-    normalized comparison (strip hyphens/underscores, case-fold).
+    Tries: exact match, then hyphen/underscore swap, then planet
+    abbreviation expansion, then fully normalized comparison (strip
+    hyphens/underscores, case-fold).
 
     Args:
         urn_name: Collection name from URN.
@@ -727,6 +775,21 @@ def _match_collection(urn_name: str, dir_names: list[str]) -> str | None:
     for d in dir_names:
         if d.replace("-", "").replace("_", "").lower() == norm:
             return d
+
+    # Planet abbreviation expansion: vg1-mag-jup -> vg1-mag-jupiter
+    expanded = _expand_planet_abbreviation(urn_name)
+    if expanded != urn_name:
+        if expanded in dir_names:
+            return expanded
+        # Also try with underscores
+        expanded_underscore = expanded.replace("-", "_")
+        if expanded_underscore in dir_names:
+            return expanded_underscore
+        # Normalized comparison
+        expanded_norm = expanded.replace("-", "").replace("_", "").lower()
+        for d in dir_names:
+            if d.replace("-", "").replace("_", "").lower() == expanded_norm:
+                return d
 
     return None
 
@@ -1147,6 +1210,91 @@ def _discover_flat(
     return _pair_data_and_labels(collection_url, file_names)
 
 
+def _filter_dirs_by_peek_date(
+    base_url: str,
+    dir_names: list[str],
+    t_min: pd.Timestamp,
+    t_max: pd.Timestamp,
+) -> list[str]:
+    """Filter directories by peeking at the first file's date in each.
+
+    For directories with many subdirectories that have no date info in
+    their names (e.g., Juno's ``PERI-00`` through ``PERI-77``), this
+    function fetches each directory's listing in parallel, extracts a
+    date from the first data filename, and returns only directories
+    whose date range could overlap with [t_min, t_max].
+
+    Uses a generous 60-day buffer to account for orbits spanning weeks.
+    Directories whose names don't follow the expected pattern, or where
+    no date can be extracted, are included by default (fail-open).
+
+    Args:
+        base_url: Parent directory URL.
+        dir_names: Subdirectory names to filter.
+        t_min: Start timestamp.
+        t_max: End timestamp.
+
+    Returns:
+        Filtered list of directory names that likely overlap the range.
+    """
+    buf = pd.Timedelta(days=60)
+
+    def _peek(d: str) -> tuple[str, pd.Timestamp | None, pd.Timestamp | None]:
+        """Return (dir_name, earliest_date, latest_date) by peeking."""
+        sub_url = f"{base_url}{d}/"
+        try:
+            entries = _list_directory(sub_url)
+        except Exception:
+            return d, None, None
+
+        fnames = [e["name"] for e in entries if not e["is_dir"]]
+        dates: list[pd.Timestamp] = []
+        for fname in fnames[:10]:  # peek at first 10 files only
+            m = _FILENAME_TIME_RE.search(fname)
+            if m:
+                g = m.groups()
+                try:
+                    dates.append(pd.Timestamp(f"{g[0]}-{g[1]}-{g[2]}"))
+                    dates.append(pd.Timestamp(f"{g[6]}-{g[7]}-{g[8]}"))
+                except Exception:
+                    pass
+            else:
+                m2 = _PDS3_FILENAME_DOY_RE.search(fname)
+                if m2:
+                    try:
+                        year, doy = int(m2.group(1)), int(m2.group(2))
+                        dates.append(
+                            pd.Timestamp(f"{year}-01-01") + pd.Timedelta(days=doy - 1)
+                        )
+                    except Exception:
+                        pass
+
+        if not dates:
+            return d, None, None
+        return d, min(dates), max(dates)
+
+    # Peek all directories in parallel
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        results = list(pool.map(lambda d: _peek(d), dir_names))
+
+    filtered: list[str] = []
+    for d, d_min, d_max in results:
+        if d_min is None:
+            # No date extracted — include to be safe
+            filtered.append(d)
+            continue
+        # Include if date range could overlap [t_min, t_max]
+        if d_max + buf >= t_min and d_min - buf <= t_max:
+            filtered.append(d)
+
+    logger.info(
+        "Time-filtered %d dirs -> %d dirs in range %s to %s",
+        len(dir_names), len(filtered),
+        t_min.strftime("%Y-%m-%d"), t_max.strftime("%Y-%m-%d"),
+    )
+    return sorted(filtered)
+
+
 def _discover_recursive(
     base_url: str,
     t_min: pd.Timestamp,
@@ -1193,13 +1341,21 @@ def _discover_recursive(
         return pairs
 
     # At deeper levels with many subdirs, use parallel HTTP requests
-    if _depth >= 2 and len(dir_names) > 5:
+    # and filter by time range when possible
+    if _depth >= 1 and len(dir_names) > 5:
+        # Filter directories by peeking at their first file's date.
+        # This avoids visiting all 78 orbit dirs (e.g., Juno PERI-XX)
+        # when only 2-3 overlap the requested time range.
+        filtered_dirs = _filter_dirs_by_peek_date(
+            base_url, dir_names, t_min, t_max,
+        )
+
         def _scan_subdir(d: str) -> list[tuple[str, str]]:
             sub_url = f"{base_url}{d}/"
             return _discover_recursive(sub_url, t_min, t_max, max_depth, _depth + 1)
 
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_scan_subdir, d): d for d in dir_names}
+            futures = {pool.submit(_scan_subdir, d): d for d in filtered_dirs}
             for future in as_completed(futures):
                 try:
                     pairs.extend(future.result())
